@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hdevelop file_version="1.2" halcon_version="24.11.1.0">
+<procedure name="detect_coax">
+<interface>
+<io>
+<par name="Image" base_type="iconic" dimension="0"/>
+</io>
+<oc>
+<par name="DetectionOK" base_type="ctrl" dimension="0"/>
+<par name="StatusCode" base_type="ctrl" dimension="0"/>
+<par name="CenterColumn" base_type="ctrl" dimension="0"/>
+<par name="CenterRow" base_type="ctrl" dimension="0"/>
+<par name="Radius" base_type="ctrl" dimension="0"/>
+<par name="FinalScore" base_type="ctrl" dimension="0"/>
+<par name="UsedFineFallback" base_type="ctrl" dimension="0"/>
+<par name="DetectTimeMs" base_type="ctrl" dimension="0"/>
+</oc>
+</interface>
+<body>
+<c>* Production single-frame procedure derived from supplied Circle-Test5 HDevelop program.</c>
+<c>* Detection algorithm, parameters, quality criteria and fallback logic are preserved.</c>
+<l>NominalRadius := 340.0</l>
+<l>GlobalScale := 0.25</l>
+<l>GlobalMinContrast := 8</l>
+<l>GlobalMinScore := 0.35</l>
+<l>GlobalNumMatches := 3</l>
+<l>GlobalGreediness := 0.85</l>
+<l>AllowPartialCircleAtBorder := 0</l>
+<l>FineMeasureLength1 := 10.0</l>
+<l>FineMeasureLength2 := 6.0</l>
+<l>FineMeasureSigma := 1.0</l>
+<l>FineMeasureThreshold := 8.0</l>
+<l>FineNumMeasures := 180</l>
+<l>FineMinScore := 0.65</l>
+<l>FineDistanceThreshold := 1.5</l>
+<l>FallbackMeasureLength1 := 16.0</l>
+<l>FallbackMeasureThreshold := 6.0</l>
+<l>FallbackMinScore := 0.55</l>
+<l>FallbackDistanceThreshold := 2.0</l>
+<l>FallbackAcceptScore := 0.55</l>
+<l>MaxRadiusDeviation := 3.5</l>
+<l>MinAcceptScore := 0.65</l>
+<l>MaxGlobalFineCenterDifference := 30.0</l>
+<l>DetectionOK := 0</l>
+<l>UsedFineFallback := 0</l>
+<l>StatusCode := 0</l>
+<l>CenterRow := -1</l>
+<l>CenterColumn := -1</l>
+<l>Radius := -1</l>
+<l>FinalScore := -1</l>
+<l>get_image_size(Image,Width,Height)</l>
+<l>GlobalModelRadius := NominalRadius*GlobalScale</l>
+<l>GlobalModelCenter := GlobalModelRadius+12.0</l>
+<l>gen_circle_contour_xld(GlobalCircleModelXLD,GlobalModelCenter,GlobalModelCenter,GlobalModelRadius,0.0,6.28318530718,'positive',1.0)</l>
+<l>create_shape_model_xld(GlobalCircleModelXLD,'auto',0.0,0.0,'auto','auto','ignore_local_polarity',GlobalMinContrast,GlobalShapeModelID)</l>
+<l>if (AllowPartialCircleAtBorder==1)</l>
+<l>    set_shape_model_param(GlobalShapeModelID,'border_shape_models','true')</l>
+<l>endif</l>
+<l>count_seconds(DetectStart)</l>
+<l>count_channels(Image,Channels)</l>
+<l>if (Channels==3)</l>
+<l>    rgb1_to_gray(Image,Gray)</l>
+<l>else</l>
+<l>    copy_image(Image,Gray)</l>
+<l>endif</l>
+<l>zoom_image_factor(Gray,GlobalSearchImage,GlobalScale,GlobalScale,'bilinear')</l>
+<l>find_shape_model(GlobalSearchImage,GlobalShapeModelID,0.0,0.0,GlobalMinScore,GlobalNumMatches,0.5,'interpolation',0,GlobalGreediness,GlobalMatchRows,GlobalMatchColumns,GlobalMatchAngles,GlobalMatchScores)</l>
+<l>if (|GlobalMatchRows|&gt;0)</l>
+<l>    for CandidateIndex := 0 to |GlobalMatchRows|-1 by 1</l>
+<l>        if (DetectionOK==0)</l>
+<l>            CoarseRowGlobal := (GlobalMatchRows[CandidateIndex]+0.5)/GlobalScale-0.5</l>
+<l>            CoarseColumnGlobal := (GlobalMatchColumns[CandidateIndex]+0.5)/GlobalScale-0.5</l>
+<l>            CandidateLocateScore := GlobalMatchScores[CandidateIndex]</l>
+<l>            create_metrology_model(FineMetrologyHandle)</l>
+<l>            set_metrology_model_image_size(FineMetrologyHandle,Width,Height)</l>
+<l>            add_metrology_object_circle_measure(FineMetrologyHandle,CoarseRowGlobal,CoarseColumnGlobal,NominalRadius,FineMeasureLength1,FineMeasureLength2,FineMeasureSigma,FineMeasureThreshold,[],[],FineCircleIndex)</l>
+<l>            set_metrology_object_param(FineMetrologyHandle,FineCircleIndex,'num_measures',FineNumMeasures)</l>
+<l>            set_metrology_object_param(FineMetrologyHandle,FineCircleIndex,'measure_transition','uniform')</l>
+<l>            set_metrology_object_param(FineMetrologyHandle,FineCircleIndex,'measure_select','all')</l>
+<l>            set_metrology_object_param(FineMetrologyHandle,FineCircleIndex,'num_instances',1)</l>
+<l>            set_metrology_object_param(FineMetrologyHandle,FineCircleIndex,'min_score',FineMinScore)</l>
+<l>            set_metrology_object_param(FineMetrologyHandle,FineCircleIndex,'distance_threshold',FineDistanceThreshold)</l>
+<l>            apply_metrology_model(Gray,FineMetrologyHandle)</l>
+<l>            get_metrology_object_result(FineMetrologyHandle,FineCircleIndex,'all','result_type','all_param',FineParameters)</l>
+<l>            get_metrology_object_result(FineMetrologyHandle,FineCircleIndex,'all','result_type','score',FineScoreTuple)</l>
+<l>            if (|FineParameters|&gt;=3)</l>
+<l>                FineRowGlobal := FineParameters[0]</l>
+<l>                FineColumnGlobal := FineParameters[1]</l>
+<l>                FineRadius := FineParameters[2]</l>
+<l>                if (|FineScoreTuple|&gt;0)</l>
+<l>                    FineScore := FineScoreTuple[0]</l>
+<l>                else</l>
+<l>                    FineScore := 0</l>
+<l>                endif</l>
+<l>                FineRadiusDeviation := abs(FineRadius-NominalRadius)</l>
+<l>                FineGlobalCenterDiff := sqrt((FineRowGlobal-CoarseRowGlobal)*(FineRowGlobal-CoarseRowGlobal)+(FineColumnGlobal-CoarseColumnGlobal)*(FineColumnGlobal-CoarseColumnGlobal))</l>
+<l>                if (FineScore&gt;=MinAcceptScore and FineRadiusDeviation&lt;=MaxRadiusDeviation and FineGlobalCenterDiff&lt;=MaxGlobalFineCenterDifference)</l>
+<l>                    DetectionOK := 1</l>
+<l>                    StatusCode := 1</l>
+<l>                    CenterRow := FineRowGlobal</l>
+<l>                    CenterColumn := FineColumnGlobal</l>
+<l>                    Radius := FineRadius</l>
+<l>                    FinalScore := FineScore</l>
+<l>                endif</l>
+<l>            endif</l>
+<l>            if (DetectionOK==0)</l>
+<l>                UsedFineFallback := 1</l>
+<l>                set_metrology_object_param(FineMetrologyHandle,FineCircleIndex,'measure_length1',FallbackMeasureLength1)</l>
+<l>                set_metrology_object_param(FineMetrologyHandle,FineCircleIndex,'measure_threshold',FallbackMeasureThreshold)</l>
+<l>                set_metrology_object_param(FineMetrologyHandle,FineCircleIndex,'min_score',FallbackMinScore)</l>
+<l>                set_metrology_object_param(FineMetrologyHandle,FineCircleIndex,'distance_threshold',FallbackDistanceThreshold)</l>
+<l>                apply_metrology_model(Gray,FineMetrologyHandle)</l>
+<l>                get_metrology_object_result(FineMetrologyHandle,FineCircleIndex,'all','result_type','all_param',FallbackParameters)</l>
+<l>                get_metrology_object_result(FineMetrologyHandle,FineCircleIndex,'all','result_type','score',FallbackScoreTuple)</l>
+<l>                if (|FallbackParameters|&gt;=3)</l>
+<l>                    FallbackRowGlobal := FallbackParameters[0]</l>
+<l>                    FallbackColumnGlobal := FallbackParameters[1]</l>
+<l>                    FallbackRadius := FallbackParameters[2]</l>
+<l>                    if (|FallbackScoreTuple|&gt;0)</l>
+<l>                        FallbackScore := FallbackScoreTuple[0]</l>
+<l>                    else</l>
+<l>                        FallbackScore := 0</l>
+<l>                    endif</l>
+<l>                    FallbackRadiusDeviation := abs(FallbackRadius-NominalRadius)</l>
+<l>                    FallbackGlobalCenterDiff := sqrt((FallbackRowGlobal-CoarseRowGlobal)*(FallbackRowGlobal-CoarseRowGlobal)+(FallbackColumnGlobal-CoarseColumnGlobal)*(FallbackColumnGlobal-CoarseColumnGlobal))</l>
+<l>                    if (FallbackScore&gt;=FallbackAcceptScore and FallbackRadiusDeviation&lt;=MaxRadiusDeviation and FallbackGlobalCenterDiff&lt;=MaxGlobalFineCenterDifference)</l>
+<l>                        DetectionOK := 1</l>
+<l>                        StatusCode := 2</l>
+<l>                        CenterRow := FallbackRowGlobal</l>
+<l>                        CenterColumn := FallbackColumnGlobal</l>
+<l>                        Radius := FallbackRadius</l>
+<l>                        FinalScore := FallbackScore</l>
+<l>                    endif</l>
+<l>                endif</l>
+<l>            endif</l>
+<l>            clear_metrology_model(FineMetrologyHandle)</l>
+<l>        endif</l>
+<l>    endfor</l>
+<l>endif</l>
+<l>count_seconds(DetectEnd)</l>
+<l>DetectTimeMs := (DetectEnd-DetectStart)*1000.0</l>
+<l>clear_shape_model(GlobalShapeModelID)</l>
+</body>
+<docu id="detect_coax"><parameters/></docu>
+</procedure>
+</hdevelop>
