@@ -14,6 +14,19 @@ ams_port = 851
 # Optional PLC IP for a remote ADS route. Empty for local runtime.
 ip_address = ""
 
+[screw_input]
+# "camera" for production or "file" for PLC/ADS/algorithm commissioning.
+mode = "camera"
+# Relative paths are resolved from the directory containing config.toml.
+# The file is decoded again for every new PLC Screw RequestId.
+image_path = "test_images/screw_test.png"
+
+[coax_input]
+# Screw and Coax input modes are independent.
+mode = "camera"
+# The file is decoded again for every new PLC Coax RequestId.
+image_path = "test_images/coax_test.png"
+
 [screw_camera]
 model_name = "ME2P-1230-9GM-P"
 # Production recommendation: fill the physical camera SN after first discovery.
