@@ -1,0 +1,10 @@
+# Install with: py -3.11 -m pip install -r requirements.txt
+# gxipy is installed from the Daheng Galaxy SDK Python package, not from here.
+# HALCON/Python must match the installed HALCON 24.11 runtime/license.
+pyads>=3.4
+numpy>=1.24
+opencv-python>=4.8
+ultralytics>=8.0
+pyinstaller>=6.0
+# Python 3.10 only:
+tomli>=2.0; python_version < "3.11"
