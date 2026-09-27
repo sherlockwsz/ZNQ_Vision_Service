@@ -118,7 +118,7 @@ def main() -> int:
     tcp = None
     workers = {}
     results: queue.Queue = queue.Queue()
-    latest_submitted = {"screw": 0, "coax": None}
+    latest_submitted = {"screw": None, "coax": None}
 
     try:
         manager = CameraManager()
@@ -129,8 +129,14 @@ def main() -> int:
         coax_ready = False
         try:
             screw_cam = manager.open_camera(_camera_cfg(cfg["screw_camera"], "screw"))
-            model_path = base_dir / str(cfg.get("screw_algorithm", {}).get("model_path", "best.pt"))
-            screw_detector = ScrewSpringDetector(model_path)
+            screw_cfg = cfg.get("screw_algorithm", {})
+            model_path = base_dir / str(screw_cfg.get("model_path", "best.pt"))
+            screw_detector = ScrewSpringDetector(
+                model_path,
+                mm_per_pixel=float(screw_cfg["mm_per_pixel"]),
+                min_screw_distance_mm=float(screw_cfg["min_screw_distance_mm"]),
+                max_screw_distance_mm=float(screw_cfg["max_screw_distance_mm"]),
+            )
             workers["screw"] = PipelineWorker("screw", screw_cam, screw_detector, results, stop_event)
             workers["screw"].start()
             screw_ready = True
@@ -190,11 +196,14 @@ def main() -> int:
                 if screw_ready:
                     st = ads.read_screw_request()
                     if st.enabled and st.request and st.request_id != latest_submitted["screw"]:
+                        # Claim before prepare/submit. A queue failure consumes this
+                        # RequestId and publishes one terminal service-fault result.
+                        latest_submitted["screw"] = st.request_id
                         ads.prepare_screw_request()
                         if workers["screw"].submit(st.request_id):
-                            latest_submitted["screw"] = st.request_id
                             log.info("Screw request accepted: %d", st.request_id)
                         else:
+                            log.error("Screw request %d failed: worker queue submit fault", st.request_id)
                             ads.publish_screw(st.request_id, invalid=True, service_fault=True)
                 if coax_ready:
                     st = ads.read_coax_request()
@@ -231,14 +240,13 @@ def main() -> int:
                         continue
 
                     if channel == "screw":
-                        # Machine-axis mapping is deliberately outside the supplied
-                        # detection/angle algorithm. Defaults (+1, 0) preserve its
-                        # exact correction-angle output.
+                        # Convert the measured undirected line angle into the PLC
+                        # correction command using only configured machine mapping.
                         screw_mapping = cfg.get("screw_mapping", {})
-                        correction_sign = float(screw_mapping.get("correction_sign", 1.0))
-                        correction_offset_deg = float(screw_mapping.get("correction_offset_deg", 0.0))
+                        correction_sign = float(screw_mapping["correction_sign"])
+                        correction_offset_deg = float(screw_mapping["correction_offset_deg"])
                         plc_correction_angle = (
-                            result.correction_angle * correction_sign + correction_offset_deg
+                            result.detected_angle * correction_sign + correction_offset_deg
                             if result.detected else 0.0
                         )
                         ads.publish_screw(
@@ -247,7 +255,7 @@ def main() -> int:
                             correction_angle=plc_correction_angle,
                             detected=result.detected,
                             confidence=result.confidence,
-                            invalid=False,
+                            invalid=not result.detected,
                             service_fault=False,
                         )
                         if store is not None:
@@ -256,15 +264,15 @@ def main() -> int:
                                     "request_id": request_id,
                                     "detected": result.detected,
                                     "detected_angle": result.detected_angle,
-                                    "algorithm_correction_angle": result.correction_angle,
                                     "correction_angle": plc_correction_angle,
                                     "confidence": result.confidence,
+                                    "invalid_reason": result.details.get("invalid_reason", ""),
                                 })
                             except Exception:
                                 log.exception("Optional Screw JPEG update failed; ADS result was already committed")
-                        log.info("Screw result %d: detected=%s algorithmCorrection=%.3f plcCorrection=%.3f confidence=%.3f wall=%.3fs",
-                                 request_id, result.detected, result.correction_angle, plc_correction_angle,
-                                 result.confidence, wall_s)
+                        log.info("Screw result %d: detected=%s detectedAngle=%.3f plcCorrection=%.3f confidence=%.3f reason=%s wall=%.3fs",
+                                 request_id, result.detected, result.detected_angle, plc_correction_angle,
+                                 result.confidence, result.details.get("invalid_reason", ""), wall_s)
                     else:
                         ads.publish_coax(
                             request_id,
