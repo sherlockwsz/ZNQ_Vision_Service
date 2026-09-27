@@ -14,6 +14,7 @@
 
 - `vision_service.py`：主进程、ADS 轮询、双视觉 worker、事务发布。
 - `camera_manager.py`：Galaxy SDK 相机唯一管理入口；软触发单帧。
+- `image_file_source.py`：按每次 PLC 请求重新读取一帧 Mono8 本地图像。
 - `screw_ai.py`：原螺钉算法的内存帧封装。
 - `coax_halcon.py`：HALCON HDevEngine 调用与结果封装。
 - `detect_coax.hdvp`：生产单帧 HALCON procedure。
@@ -23,7 +24,39 @@
 - `best.pt`：你上传的模型原文件。
 - `config.toml`：ADS、相机、TCP、轴映射配置。
 
-## 3. TwinCAT 改动
+## 3. Camera / File 图像源切换
+
+Screw 与 Coax 可以独立选择 `camera` 或 `file`，默认仍为正式相机模式：
+
+```toml
+[screw_input]
+mode = "camera"
+image_path = "test_images/screw_test.png"
+
+[coax_input]
+mode = "camera"
+image_path = "test_images/coax_test.png"
+```
+
+两路都使用本地图片联调时改为：
+
+```toml
+[screw_input]
+mode = "file"
+image_path = "test_images/screw_test.png"
+
+[coax_input]
+mode = "file"
+image_path = "test_images/coax_test.png"
+```
+
+也可以只把其中一路设为 `file`。相对路径以 `config.toml` 所在目录为基准；`file/file` 时不会初始化、枚举或打开 Galaxy 相机。
+
+File 模式只替换采图源：仍必须由 PLC 的 `bMeasureRequest + udiRequestId` 触发，仍进入原 `PipelineWorker -> process_frame() -> ADS publish` 正式链路。每个新的 RequestId 都会重新执行一次文件读取，所以服务运行期间替换同名图片后无需重启。读取失败会按当前 RequestId 返回 `bResultValid=TRUE`、`bResultInvalid=TRUE`、`bServiceFault=TRUE`，不会静默生成假图或让 PLC 等待视觉处理超时。
+
+`test_images/` 不包含伪造工件图。请放入真实采集的 `screw_test.png` 与 `coax_test.png`。File 模式用于 PLC/ADS/算法联调，Screw 的 `mm_per_pixel`、Coax 的标定值仍必须由现场真实相机和标准件标定；本地图像得到的物理毫米结果不能替代正式标定。
+
+## 4. TwinCAT 改动
 
 输出包里的 `TwinCAT/ZNQ_MoveCtrl_VisionCameraMode.zip` 只把：
 
@@ -32,7 +65,7 @@
 
 原有 `FB_VisionRequest`、`FB_ScrewAngleVision`、`FB_CoaxVision` 和机械流程不重写，因为它们已经具备独立 RequestId/ResultId、超时、结果有效性和双任务隔离。
 
-## 4. 现场安装顺序
+## 5. 现场安装顺序
 
 1. 安装大恒 Galaxy SDK，并确认 Galaxy Viewer 能同时枚举两台相机。
 2. 安装 Galaxy SDK 附带的 Python `gxipy`。
@@ -46,7 +79,7 @@
 7. 运行 `run_vision_service.bat`；日志应出现两条 pipeline ready 和 ADS connected。
 8. PLC 发出 `bMeasureRequest + udiRequestId` 后，服务只触发对应相机一帧，并以相同 `udiResultId` 提交结果。
 
-## 5. 结果映射
+## 6. 结果映射
 
 ### 螺钉
 
@@ -77,7 +110,7 @@
 - `reference_x_px=-1.0`、`reference_y_px=-1.0` 表示暂用图像中心；`mm_per_pixel=0.0025` 也是临时调试值。投产前必须用标准件标定并替换这三个值。
 - 原 `coax_mapping.delta_x_sign / delta_y_sign` 仅为后续阶段保留，本阶段不应用。
 
-## 6. TCP 图像协议（给 WPF）
+## 7. TCP 图像协议（给 WPF）
 
 WPF 建立 TCP 长连接到 `50010`，发送一行：
 
@@ -94,11 +127,11 @@ WPF 建立 TCP 长连接到 `50010`，发送一行：
 
 这里返回的是**最近一次 PLC 触发检测的标注图**，WPF 不会因此触发相机。
 
-## 7. 关于 EXE
+## 8. 关于 EXE
 
 执行 `build_exe.bat` 可生成 `dist\VisionService\VisionService.exe`。Galaxy SDK 和 HALCON 含原生 DLL/许可证，最稳妥的现场方式是先在目标电脑安装对应官方 Runtime/SDK，再运行 EXE；不要把相机/HALCON DLL 随意从开发机拷过去。
 
-## 8. 投产前检查
+## 9. 投产前检查
 
 - 两台相机 SN 固定并记录。
 - 两块网卡/10GigE 链路在 Galaxy Viewer 中无丢包。
