@@ -1,0 +1,63 @@
+# TwinCAT + Python Vision Service production configuration
+
+[service]
+ads_poll_interval_ms = 20
+log_level = "INFO"
+log_dir = "logs"
+
+[ads]
+# Leave empty when VisionService.exe runs on the same Windows/TwinCAT host and
+# pyads can resolve the local AMS Net ID. For a remote PLC, set the target AMS
+# Net ID explicitly (example format: 192.168.1.10.1.1).
+ams_net_id = ""
+ams_port = 851
+# Optional PLC IP for a remote ADS route. Empty for local runtime.
+ip_address = ""
+
+[screw_camera]
+model_name = "ME2P-1230-9GM-P"
+# Production recommendation: fill the physical camera SN after first discovery.
+# When empty, exact model_name matching is used; startup fails if ambiguous.
+serial = ""
+# 0 / -1 means preserve the camera's configured value in Galaxy Viewer/UserSet.
+exposure_us = 0.0
+gain_db = -1.0
+timeout_ms = 3000
+
+[coax_camera]
+model_name = "MARS-2621-42GTM"
+serial = ""
+exposure_us = 0.0
+gain_db = -1.0
+timeout_ms = 3000
+
+[screw_algorithm]
+model_path = "best.pt"
+
+[screw_mapping]
+# Post-algorithm mapping from the supplied clockwise correction angle to the
+# DamperRotation machine-axis command. Defaults preserve the algorithm exactly.
+correction_sign = 1.0
+correction_offset_deg = 0.0
+
+[coax_algorithm]
+procedure_path = "detect_coax.hdvp"
+# Phase 1 calibration source of truth. Negative reference coordinates mean:
+# TEMPORARY COMMISSIONING DEFAULT = use (image_size - 1) / 2 for that axis.
+# Before production, replace both with standard-part calibrated pixel values.
+reference_x_px = -1.0
+reference_y_px = -1.0
+# TEMPORARY COMMISSIONING VALUE. Replace with the calibrated scale.
+mm_per_pixel = 0.0025
+
+[coax_mapping]
+# Reserved compatibility fields for a later Camera -> Machine calibration phase.
+# Coax Phase 1 deliberately does not apply them: +DeltaX is image-right and
+# +DeltaY is image-down, and Python never commands Adjustment axes.
+delta_x_sign = 1.0
+delta_y_sign = 1.0
+
+[tcp_image]
+host = "0.0.0.0"
+port = 50010
+jpeg_quality = 85
