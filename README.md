@@ -7,7 +7,7 @@
 - PLC 仍然只决定**什么时候测量**，沿用现有 `GVL_ScrewVision.stInterface` / `GVL_CoaxVision.stInterface` 的 `RequestId -> ResultId` 握手。
 - `Python Vision Service` 是唯一视觉计算入口，负责两台大恒相机、YOLO、HALCON 和 ADS；原 TCP 图像模块仅保留备用，不是本阶段检测链依赖。
 - TCP 未启动、端口占用、WPF 未运行或 JPEG 编码失败，均不影响 Coax ADS 测量链。
-- 螺钉算法的筛框、Spring 选择、旋转角公式保持不变，只把 `cv2.imread()` 改成内存帧。
+- 螺钉检测仅使用恰好两个有效 Screw；Spring 类可由模型继续识别，但不参与有效性、角度或修正角计算。
 - 同轴度算法的全视野缩小搜索、Shape Model、原图 Metrology、Fallback 和质量阈值保持不变；HALCON 返回圆心与检测状态，Python 使用 `config.toml` 的唯一标定参数源计算毫米结果。
 
 ## 2. 文件
@@ -50,10 +50,24 @@
 
 ### 螺钉
 
-- `fDetectedAngle`：两个螺钉中心连线的原始图像角，仅诊断/显示。
-- `fCorrectionAngle`：原程序 `calculate_angle_for_rotation()` 的返回值经过 `screw_mapping` 的机械轴方向/零偏映射后送 PLC；默认 `+1 / 0°`，因此默认值与原算法完全一致。
-- `bDetected`：检测到 2 个 Screw 且成功选中 Spring。
-- `fConfidence`：3 个被实际选中目标的最低置信度，仅诊断，不参与原算法筛选或角度判定。
+- `fDetectedAngle`：两个螺钉中心连线相对于图像水平 `+X` 的无方向直线角，固定为 `[0°, 180°)`；交换两点顺序不改变结果。
+- `fCorrectionAngle`：`fDetectedAngle * correction_sign + correction_offset_deg`，由配置完成机械方向和零偏映射后送 PLC。
+- `bDetected`：仅当有效 Screw 数量恰好为 2，且按 Screw Camera 独立比例换算的中心距位于 `24.0～26.0 mm`（含边界）时为 TRUE。
+- `fConfidence`：两个 Screw 的最低置信度，仅诊断；不会从 3 个或更多 Screw 中截取两个继续计算。
+- Spring 不参与 `bDetected`、`fDetectedAngle`、`fCorrectionAngle` 或 Screw 有效性判断。
+
+### Screw 结果状态
+
+- 成功：`bDetected=TRUE`、`bResultValid=TRUE`、`bResultInvalid=FALSE`、`bServiceFault=FALSE`。
+- 算法正常但数量/距离无效：`FALSE / TRUE / TRUE / FALSE`。
+- 相机、YOLO、Worker 或任务提交异常：`FALSE / TRUE / TRUE / TRUE`。
+- `bResultValid` 仍由 ADS Bridge 最后写入，作为本次结果的提交标志。
+
+### Screw 配置
+
+- `screw_algorithm.mm_per_pixel`：Screw Camera 独立像素比例；当前 `0.1` 仅为明确的临时占位值，现场必须标定。
+- `screw_algorithm.min_screw_distance_mm=24.0`、`max_screw_distance_mm=26.0`：两个 Screw 中心距有效闭区间。
+- `screw_mapping.correction_sign`、`correction_offset_deg`：机械旋转方向与零偏映射；不写死在算法中。
 
 ### 同轴度（Coax Phase 1）
 
@@ -91,6 +105,7 @@ WPF 建立 TCP 长连接到 `50010`，发送一行：
 - 两台相机均为 Mono8（服务会拒绝非 uint8，避免静默改变算法输入）。
 - TwinCAT 两视觉模式均为 Camera。
 - 逐项验证 Screw RequestId/ResultId、Coax RequestId/ResultId。
+- 使用标准件标定 Screw Camera 的 `screw_algorithm.mm_per_pixel`，再验证 `24.0～26.0 mm` 中心距边界。
 - 使用标准件标定 `reference_x_px`、`reference_y_px`、`mm_per_pixel`，并验证图像坐标下的偏差值；Adjustment 坐标映射留待后续阶段。
 - 人工放置多个已知角度样件，确认 `fCorrectionAngle` 与 DamperRotation 实际正方向一致。
 - 低速验证 `screw_mapping.correction_sign`；若算法定义的顺时针正方向与 DamperRotation 机械正方向相反，只改映射符号，不改角度算法。
