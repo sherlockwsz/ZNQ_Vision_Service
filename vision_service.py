@@ -19,6 +19,7 @@ except ImportError:  # Python 3.10 fallback
 from ads_bridge import AdsConfig, VisionAdsBridge
 from camera_manager import CameraConfig, CameraManager
 from coax_halcon import CoaxHalconDetector
+from image_file_source import ImageFileSource
 from screw_ai import ScrewSpringDetector
 from tcp_image_server import LatestImageStore, TcpImageServer
 
@@ -26,10 +27,10 @@ log = logging.getLogger("vision_service")
 
 
 class PipelineWorker(threading.Thread):
-    def __init__(self, name, camera, detector, result_queue: queue.Queue, stop_event: threading.Event):
+    def __init__(self, name, source, detector, result_queue: queue.Queue, stop_event: threading.Event):
         super().__init__(name=f"{name}-worker", daemon=True)
         self.channel = name
-        self.camera = camera
+        self.source = source
         self.detector = detector
         self.result_queue = result_queue
         self.stop_event = stop_event
@@ -52,7 +53,7 @@ class PipelineWorker(threading.Thread):
                 continue
             started = time.perf_counter()
             try:
-                frame = self.camera.capture_single()
+                frame = self.source.capture_single()
                 result = self.detector.process_frame(frame)
                 self.result_queue.put((self.channel, request_id, result, None, time.perf_counter() - started))
             except Exception as exc:
@@ -70,6 +71,30 @@ def _camera_cfg(table: dict, name: str) -> CameraConfig:
         gain_db=float(table.get("gain_db", -1.0)),
         timeout_ms=int(table.get("timeout_ms", 3000)),
     )
+
+
+def _input_mode(cfg: dict, channel: str) -> str:
+    mode = str(cfg.get(f"{channel}_input", {}).get("mode", "camera")).strip().lower()
+    if mode not in ("camera", "file"):
+        raise ValueError(f"{channel}_input.mode must be 'camera' or 'file', got {mode!r}")
+    return mode
+
+
+def _create_source(cfg: dict, base_dir: Path, channel: str, mode: str,
+                   manager: CameraManager | None):
+    if mode == "camera":
+        if manager is None:
+            raise RuntimeError(f"CameraManager is unavailable for {channel} camera input")
+        return manager.open_camera(_camera_cfg(cfg[f"{channel}_camera"], channel))
+
+    input_cfg = cfg.get(f"{channel}_input", {})
+    configured_path = str(input_cfg.get("image_path", "")).strip()
+    if not configured_path:
+        raise ValueError(f"{channel}_input.image_path is required when mode='file'")
+    image_path = Path(configured_path)
+    if not image_path.is_absolute():
+        image_path = base_dir / image_path
+    return ImageFileSource(image_path)
 
 
 def configure_logging(base_dir: Path, cfg: dict):
@@ -121,14 +146,23 @@ def main() -> int:
     latest_submitted = {"screw": None, "coax": None}
 
     try:
-        manager = CameraManager()
+        screw_mode = _input_mode(cfg, "screw")
+        coax_mode = _input_mode(cfg, "coax")
+        if "camera" in (screw_mode, coax_mode):
+            try:
+                manager = CameraManager()
+            except Exception:
+                # A camera-side initialization fault must not prevent an
+                # independently configured file pipeline from running.
+                log.exception("Galaxy CameraManager initialization failed")
 
         # Initialize each pipeline independently so one camera/algorithm can remain
-        # online while the other is being serviced.
+        # online while the other is being serviced. File and camera sources both
+        # enter the same worker, detector, ADS and ResultId publication path.
         screw_ready = False
         coax_ready = False
         try:
-            screw_cam = manager.open_camera(_camera_cfg(cfg["screw_camera"], "screw"))
+            screw_source = _create_source(cfg, base_dir, "screw", screw_mode, manager)
             screw_cfg = cfg.get("screw_algorithm", {})
             model_path = base_dir / str(screw_cfg.get("model_path", "best.pt"))
             screw_detector = ScrewSpringDetector(
@@ -137,15 +171,15 @@ def main() -> int:
                 min_screw_distance_mm=float(screw_cfg["min_screw_distance_mm"]),
                 max_screw_distance_mm=float(screw_cfg["max_screw_distance_mm"]),
             )
-            workers["screw"] = PipelineWorker("screw", screw_cam, screw_detector, results, stop_event)
+            workers["screw"] = PipelineWorker("screw", screw_source, screw_detector, results, stop_event)
             workers["screw"].start()
             screw_ready = True
-            log.info("Screw pipeline ready")
+            log.info("Screw pipeline ready (input=%s)", screw_mode)
         except Exception:
             log.exception("Screw pipeline initialization failed")
 
         try:
-            coax_cam = manager.open_camera(_camera_cfg(cfg["coax_camera"], "coax"))
+            coax_source = _create_source(cfg, base_dir, "coax", coax_mode, manager)
             coax_cfg = cfg.get("coax_algorithm", {})
             proc_path = base_dir / str(coax_cfg.get("procedure_path", "detect_coax.hdvp"))
             coax_detector = CoaxHalconDetector(
@@ -154,10 +188,10 @@ def main() -> int:
                 reference_y_px=float(coax_cfg.get("reference_y_px", -1.0)),
                 mm_per_pixel=float(coax_cfg.get("mm_per_pixel", 0.0025)),
             )
-            workers["coax"] = PipelineWorker("coax", coax_cam, coax_detector, results, stop_event)
+            workers["coax"] = PipelineWorker("coax", coax_source, coax_detector, results, stop_event)
             workers["coax"].start()
             coax_ready = True
-            log.info("Coax pipeline ready")
+            log.info("Coax pipeline ready (input=%s)", coax_mode)
         except Exception:
             log.exception("Coax pipeline initialization failed")
 
@@ -191,7 +225,7 @@ def main() -> int:
 
         while not stop_event.is_set():
             # Poll PLC command structure. A new RequestId schedules exactly one
-            # software-triggered frame on the corresponding camera.
+            # frame from the configured source for the corresponding pipeline.
             try:
                 if screw_ready:
                     st = ads.read_screw_request()
