@@ -33,10 +33,15 @@ timeout_ms = 3000
 
 [screw_algorithm]
 model_path = "best.pt"
+# TEMPORARY COMMISSIONING PLACEHOLDER. Replace with the calibrated Screw Camera
+# scale before validating production parts; it is independent of Coax Camera.
+mm_per_pixel = 0.1
+min_screw_distance_mm = 24.0
+max_screw_distance_mm = 26.0
 
 [screw_mapping]
-# Post-algorithm mapping from the supplied clockwise correction angle to the
-# DamperRotation machine-axis command. Defaults preserve the algorithm exactly.
+# Mapping from the measured undirected Screw line angle to the DamperRotation
+# correction command. Confirm sign and zero offset by low-speed mechanical test.
 correction_sign = 1.0
 correction_offset_deg = 0.0
 
