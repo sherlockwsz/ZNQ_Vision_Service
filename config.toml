@@ -9,23 +9,23 @@ log_dir = "logs"
 # Leave empty when VisionService.exe runs on the same Windows/TwinCAT host and
 # pyads can resolve the local AMS Net ID. For a remote PLC, set the target AMS
 # Net ID explicitly (example format: 192.168.1.10.1.1).
-ams_net_id = ""
+ams_net_id = "172.18.238.251.1.1"
 ams_port = 851
 # Optional PLC IP for a remote ADS route. Empty for local runtime.
 ip_address = ""
 
 [screw_input]
 # "camera" for production or "file" for PLC/ADS/algorithm commissioning.
-mode = "camera"
+mode = "file"
 # Relative paths are resolved from the directory containing config.toml.
 # The file is decoded again for every new PLC Screw RequestId.
-image_path = "test_images/screw_test.png"
+image_path = "test_images/screw_test.bmp"
 
 [coax_input]
 # Screw and Coax input modes are independent.
-mode = "camera"
+mode = "file"
 # The file is decoded again for every new PLC Coax RequestId.
-image_path = "test_images/coax_test.png"
+image_path = "test_images/coax_test.bmp"
 
 [screw_camera]
 model_name = "ME2P-1230-9GM-P"

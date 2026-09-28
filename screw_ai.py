@@ -92,7 +92,23 @@ class ScrewSpringDetector:
                     "center": self.calculate_center(bbox),
                 })
 
-        filtered_results["screw_centers"] = [box["center"] for box in filtered_results["screw_boxes"]]
+        #filtered_results["screw_centers"] = [box["center"] for box in filtered_results["screw_boxes"]]
+        
+        #return filtered_results
+
+        # TEMP DEBUG:
+        # 多个 Screw 时按置信度从高到低排列，
+        # 后续临时取前两个计算角度。
+        filtered_results["screw_boxes"].sort(
+            key=lambda x: x["confidence"],
+            reverse=True
+        )
+
+        filtered_results["screw_centers"] = [
+            box["center"]
+            for box in filtered_results["screw_boxes"]
+        ]
+
         return filtered_results
 
     @staticmethod
@@ -101,7 +117,7 @@ class ScrewSpringDetector:
         dx = screw2[0] - screw1[0]
         dy = screw2[1] - screw1[1]
         return math.degrees(math.atan2(dy, dx)) % 180.0
-
+    '''
     def _evaluate_screw_geometry(self, screw_centers):
         """Return angle/distance for exactly two valid centers, or an invalid reason."""
         screw_count = len(screw_centers)
@@ -116,6 +132,42 @@ class ScrewSpringDetector:
 
         detected_angle = self._detected_line_angle(screw1, screw2)
         return detected_angle, distance_px, distance_mm, ""
+    '''    
+    def _evaluate_screw_geometry(self, screw_centers):
+        """TEMP DEBUG: use the first two screws and bypass distance validity check."""
+        screw_count = len(screw_centers)
+
+        # 至少必须存在两个 Screw，否则无法计算连线角度
+        if screw_count < 2:
+            return None, None, None, f"not enough screws: {screw_count}"
+
+        # TEMP DEBUG:
+        # screw_centers 已按 confidence 对应顺序排列，
+        # 临时只取前两个 Screw 计算。
+        screw1 = screw_centers[0]
+        screw2 = screw_centers[1]
+
+        # 中心距仍然计算，只是不再用于 InvalidResult 判定
+        distance_px = self.calculate_distance(screw1, screw2)
+        distance_mm = distance_px * self.mm_per_pixel
+
+        # TEMP DEBUG:
+        # 暂时旁路正式的 24~26 mm 中心距判定
+        #
+        # if not self.min_screw_distance_mm <= distance_mm <= self.max_screw_distance_mm:
+        #     return None, distance_px, distance_mm, "screw distance invalid"
+
+        detected_angle = self._detected_line_angle(
+            screw1,
+            screw2
+        )
+
+        return (
+            detected_angle,
+            distance_px,
+            distance_mm,
+            ""
+        )
 
     def process_frame(self, frame: np.ndarray) -> ScrewInspectionResult:
         if frame is None or frame.size == 0:
@@ -169,7 +221,7 @@ class ScrewSpringDetector:
         mid_point = ((center1[0] + center2[0]) // 2, (center1[1] + center2[1]) // 2)
         cv2.circle(image, mid_point, 10, (0, 255, 255), thickness=-1)
 
-        selected_confidences = [x["confidence"] for x in filtered_results["screw_boxes"]]
+        selected_confidences = [x["confidence"] for x in filtered_results["screw_boxes"][:2]]
         confidence = min(selected_confidences) if selected_confidences else 0.0
 
         text = f"Detected angle: {detected_angle:.2f} deg  Distance: {distance_mm:.2f} mm"

@@ -279,10 +279,26 @@ def main() -> int:
                         screw_mapping = cfg.get("screw_mapping", {})
                         correction_sign = float(screw_mapping["correction_sign"])
                         correction_offset_deg = float(screw_mapping["correction_offset_deg"])
-                        plc_correction_angle = (
-                            result.detected_angle * correction_sign + correction_offset_deg
-                            if result.detected else 0.0
-                        )
+                        if result.detected:
+                            detected_angle = result.detected_angle
+
+                            # Minimum signed rotation required to make the
+                            # undirected screw line horizontal (0° / 180°).
+                            #
+                            # Assumption:
+                            # DamperRotation positive direction increases
+                            # the detected image angle.
+                            correction_angle = (
+                                (90.0 - detected_angle) % 180.0
+                            ) - 90.0
+
+                            plc_correction_angle = (
+                                correction_angle * correction_sign
+                                + correction_offset_deg
+                            )
+                        else:
+                            plc_correction_angle = 0.0  
+                                                  
                         ads.publish_screw(
                             request_id,
                             detected_angle=result.detected_angle,
