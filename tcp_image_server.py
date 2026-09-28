@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class ImagePacket:
     metadata: dict
-    jpeg/ bytes
+    jpeg: bytes
 
 
 class LatestImageStore:
@@ -64,7 +64,7 @@ class LatestImageStore:
         })
         packet = ImagePacket(meta, encoded.tobytes())
         with self._lock:
-            self._packets[channel] = packet
+            self._packkets[channel] = packet
 
     def mark_error(self, channel: str, error: str, metadata: dict | None = None) -> None:
         """Publish preview health without discarding the last successful JPEG."""
@@ -123,12 +123,12 @@ class _Handler(socketserver.StreamRequestHandler):
                 meta["ok"] = True
                 self._send(meta, packet.jpeg)
 
-    def _send(self, meta: dict, jpeg/ bytes):
+    def _send(self, meta: dict, jpeg: bytes):
         header = json.dumps(meta, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.wfile.write(struct.pack(">I", len(header)))
         self.wfile.write(header)
         self.wfile.write(struct.pack(">I", len(jpeg)))
-        if jpeg/
+        if jpeg:
             self.wfile.write(jpeg)
         self.wfile.flush()
 
@@ -142,7 +142,6 @@ class TcpImageServer:
     def __init__(self, host: str, port: int, store: LatestImageStore):
         self.host = host
         self.port = int(port)
-        self.store = store
         self._server = _ReusableThreadingTCPServer((host, self.port), _Handler)
         self._server.store = store  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._server.serve_forever, name="tcp-image-server", daemon=True)
