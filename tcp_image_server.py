@@ -18,24 +18,74 @@ log = logging.getLogger(__name__)
 @dataclass
 class ImagePacket:
     metadata: dict
-    jpeg: bytes
+    jpeg/ bytes
 
 
 class LatestImageStore:
+    CHANNELS = frozenset(("screw", "coax", "screw_preview", "coax_preview"))
+
     def __init__(self, jpeg_quality: int = 85):
         self.jpeg_quality = int(jpeg_quality)
         self._lock = threading.Lock()
         self._packets: Dict[str, ImagePacket] = {}
 
-    def update(self, channel: str, image: np.ndarray, metadata: dict) -> None:
-        ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
+    def update(self, channel: str, image: np.ndarray, metadata: dict,
+               *, jpeg_quality: int | None = None,
+               max_width: int | None = None) -> None:
+        channel = channel.lower()
+        if channel not in self.CHANNELS:
+            raise ValueError(f"Unsupported image channel: {channel}")
+
+        output = image
+        if max_width is not None and max_width > 0 and image.shape[1] > max_width:
+            scale = float(max_width) / float(image.shape[1])
+            output = cv2.resize(
+                image,
+                (int(max_width), max(1, int(round(image.shape[0] * scale)))),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        quality = self.jpeg_quality if jpeg_quality is None else int(jpeg_quality)
+        ok, encoded = cv2.imencode(
+            ".jpg",
+            output,
+            [int(cv2.IMWRITE_JPEG_QUALITY), quality],
+        )
         if not ok:
             raise RuntimeError("JPEG encoding failed")
         meta = dict(metadata)
-        meta.update({"channel": channel, "timestamp_unix": time.time()})
+        timestamp = time.time()
+        meta.update({
+            "protocol_version": 1,
+            "channel": channel,
+            "timestamp": timestamp,
+            "timestamp_unix": timestamp,
+            "image_status": "ok",
+        })
         packet = ImagePacket(meta, encoded.tobytes())
         with self._lock:
             self._packets[channel] = packet
+
+    def mark_error(self, channel: str, error: str, metadata: dict | None = None) -> None:
+        """Publish preview health without discarding the last successful JPEG."""
+        channel = channel.lower()
+        if channel not in self.CHANNELS:
+            return
+        with self._lock:
+            previous = self._packets.get(channel)
+            meta = dict(previous.metadata) if previous is not None else {}
+            if metadata:
+                meta.update(metadata)
+            meta.update({
+                "protocol_version": 1,
+                "channel": channel,
+                "image_status": "error",
+                "image_error": str(error),
+            })
+            self._packets[channel] = ImagePacket(
+                meta,
+                previous.jpeg if previous is not None else b"",
+            )
 
     def get(self, channel: str) -> Optional[ImagePacket]:
         with self._lock:
@@ -55,8 +105,15 @@ class _Handler(socketserver.StreamRequestHandler):
             if cmd[0].upper() == "PING":
                 self._send({"ok": True, "type": "pong"}, b"")
                 continue
-            if len(cmd) != 2 or cmd[0].upper() != "GET" or cmd[1].lower() not in ("screw", "coax"):
-                self._send({"ok": False, "error": "use: GET screw | GET coax | PING"}, b"")
+            if (len(cmd) != 2 or cmd[0].upper() != "GET"
+                    or cmd[1].lower() not in LatestImageStore.CHANNELS):
+                self._send({
+                    "ok": False,
+                    "error": (
+                        "use: GET screw | GET coax | GET screw_preview | "
+                        "GET coax_preview | PING"
+                    ),
+                }, b"")
                 continue
             packet = store.get(cmd[1].lower())
             if packet is None:
@@ -66,12 +123,12 @@ class _Handler(socketserver.StreamRequestHandler):
                 meta["ok"] = True
                 self._send(meta, packet.jpeg)
 
-    def _send(self, meta: dict, jpeg: bytes):
+    def _send(self, meta: dict, jpeg/ bytes):
         header = json.dumps(meta, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.wfile.write(struct.pack(">I", len(header)))
         self.wfile.write(header)
         self.wfile.write(struct.pack(">I", len(jpeg)))
-        if jpeg:
+        if jpeg/
             self.wfile.write(jpeg)
         self.wfile.flush()
 

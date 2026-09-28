@@ -27,7 +27,11 @@ namespace VisionClient
             string channel, CancellationToken ct = default)
         {
             if (_stream == null) throw new InvalidOperationException("Not connected");
-            if (channel != "screw" && channel != "coax") throw new ArgumentOutOfRangeException(nameof(channel));
+            if (channel != "screw" && channel != "coax" &&
+                channel != "screw_preview" && channel != "coax_preview")
+            {
+                throw new ArgumentOutOfRangeException(nameof(channel));
+            }
 
             byte[] request = Encoding.UTF8.GetBytes($"GET {channel}\n");
             await _stream.WriteAsync(request, ct);

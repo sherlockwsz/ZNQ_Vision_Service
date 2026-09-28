@@ -13,6 +13,7 @@
 ## 2. 文件
 
 - `vision_service.py`：主进程、ADS 轮询、双视觉 worker、事务发布。
+- `pipeline_worker.py`：每路唯一采集Worker，调度正式检测优先于Preview。
 - `camera_manager.py`：Galaxy SDK 相机唯一管理入口；软触发单帧。
 - `image_file_source.py`：按每次 PLC 请求重新读取一帧 Mono8 本地图像。
 - `screw_ai.py`：原螺钉算法的内存帧封装。
@@ -116,6 +117,8 @@ WPF 建立 TCP 长连接到 `50010`，发送一行：
 
 - `GET screw\n`
 - `GET coax\n`
+- `GET screw_preview\n`
+- `GET coax_preview\n`
 - `PING\n`
 
 响应：
@@ -125,7 +128,15 @@ WPF 建立 TCP 长连接到 `50010`，发送一行：
 3. 4 字节 big-endian JPEG 长度
 4. JPEG 数据
 
-这里返回的是**最近一次 PLC 触发检测的标注图**，WPF 不会因此触发相机。
+`screw` / `coax` 永久表示最近一次 PLC 正式检测标注图；
+`screw_preview` / `coax_preview` 表示对应唯一 Worker 最新采集的原图。
+Preview 默认 5 FPS、最大宽度 1280、JPEG Quality 80，只采图和编码，
+不运行 YOLO/HALCON，也不会覆盖正式检测图缓存。正式 RequestId 到达时，
+同一 Worker 在当前采集完成后优先执行正式检测，再恢复 Preview。
+
+File 模式的 Preview 按文件 `mtime` 复用解码缓存；同名文件发生变化时自动重读。
+文件删除或损坏时保留最后成功的 Preview 并发布异常状态，但新的正式检测仍会
+重新读取文件并按原 Invalid/ServiceFault 事务返回，绝不会用旧图冒充新结果。
 
 ## 8. 关于 EXE
 

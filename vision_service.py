@@ -20,6 +20,7 @@ from ads_bridge import AdsConfig, VisionAdsBridge
 from camera_manager import CameraConfig, CameraManager
 from coax_halcon import CoaxHalconDetector
 from image_file_source import ImageFileSource
+from pipeline_worker import PipelineWorker as PreviewPipelineWorker
 from screw_ai import ScrewSpringDetector
 from tcp_image_server import LatestImageStore, TcpImageServer
 
@@ -148,6 +149,10 @@ def main() -> int:
     try:
         screw_mode = _input_mode(cfg, "screw")
         coax_mode = _input_mode(cfg, "coax")
+        image_cfg = cfg.get("tcp_image", {})
+        preview_fps = float(image_cfg.get("preview_fps", 5.0))
+        preview_max_width = int(image_cfg.get("preview_max_width", 1280))
+        preview_jpeg_quality = int(image_cfg.get("preview_jpeg_quality", 80))
         if "camera" in (screw_mode, coax_mode):
             try:
                 manager = CameraManager()
@@ -171,7 +176,11 @@ def main() -> int:
                 min_screw_distance_mm=float(screw_cfg["min_screw_distance_mm"]),
                 max_screw_distance_mm=float(screw_cfg["max_screw_distance_mm"]),
             )
-            workers["screw"] = PipelineWorker("screw", screw_source, screw_detector, results, stop_event)
+            workers["screw"] = PreviewPipelineWorker(
+                "screw", screw_source, screw_detector, results, stop_event,
+                source_mode=screw_mode, preview_fps=preview_fps,
+                preview_max_width=preview_max_width,
+                preview_jpeg_quality=preview_jpeg_quality)
             workers["screw"].start()
             screw_ready = True
             log.info("Screw pipeline ready (input=%s)", screw_mode)
@@ -188,7 +197,11 @@ def main() -> int:
                 reference_y_px=float(coax_cfg.get("reference_y_px", -1.0)),
                 mm_per_pixel=float(coax_cfg.get("mm_per_pixel", 0.0025)),
             )
-            workers["coax"] = PipelineWorker("coax", coax_source, coax_detector, results, stop_event)
+            workers["coax"] = PreviewPipelineWorker(
+                "coax", coax_source, coax_detector, results, stop_event,
+                source_mode=coax_mode, preview_fps=preview_fps,
+                preview_max_width=preview_max_width,
+                preview_jpeg_quality=preview_jpeg_quality)
             workers["coax"].start()
             coax_ready = True
             log.info("Coax pipeline ready (input=%s)", coax_mode)
@@ -202,7 +215,6 @@ def main() -> int:
         # measurement chain. Port binding failure must not stop PLC measurements.
         store = None
         try:
-            image_cfg = cfg.get("tcp_image", {})
             store = LatestImageStore(jpeg_quality=int(image_cfg.get("jpeg_quality", 85)))
             tcp = TcpImageServer(str(image_cfg.get("host", "0.0.0.0")), int(image_cfg.get("port", 50010)), store)
             tcp.start()
@@ -210,6 +222,9 @@ def main() -> int:
             tcp = None
             store = None
             log.exception("Optional TCP image server unavailable; ADS vision remains active")
+
+        for worker in workers.values():
+            worker.configure_image_store(store)
 
         ads_cfg = cfg.get("ads", {})
         ads = VisionAdsBridge(AdsConfig(
@@ -312,6 +327,8 @@ def main() -> int:
                             try:
                                 store.update("screw", result.annotated_image, {
                                     "request_id": request_id,
+                                    "source_mode": screw_mode,
+                                    "source_name": getattr(screw_source, "source_name", ""),
                                     "detected": result.detected,
                                     "detected_angle": result.detected_angle,
                                     "correction_angle": plc_correction_angle,
@@ -336,6 +353,8 @@ def main() -> int:
                             try:
                                 store.update("coax", result.annotated_image, {
                                     "request_id": request_id,
+                                    "source_mode": coax_mode,
+                                    "source_name": getattr(coax_source, "source_name", ""),
                                     "detection_ok": result.detection_ok,
                                     "coaxiality_mm": result.coaxiality_mm,
                                     "delta_x_mm": result.delta_x_mm,
@@ -359,19 +378,18 @@ def main() -> int:
         return 1
     finally:
         stop_event.set()
-        if ads is not None:
-            try: ads.close()
-            except Exception: log.exception("ADS shutdown failed")
         if tcp is not None:
             try: tcp.close()
             except Exception: log.exception("TCP shutdown failed")
-        # Let any in-flight frame/inference finish before closing Galaxy camera
-        # handles. ADS is already offline, so no shutdown result is consumed by PLC.
+        # Camera handles are never closed while a worker can still access them.
         for worker in workers.values():
-            worker.join(timeout=10.0)
+            worker.join()
         if manager is not None:
             try: manager.close()
             except Exception: log.exception("Camera shutdown failed")
+        if ads is not None:
+            try: ads.close()
+            except Exception: log.exception("ADS shutdown failed")
         log.info("Vision service stopped")
     return 0
 
