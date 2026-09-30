@@ -157,10 +157,14 @@ class ScrewSpringDetector:
         # if not self.min_screw_distance_mm <= distance_mm <= self.max_screw_distance_mm:
         #     return None, distance_px, distance_mm, "screw distance invalid"
 
-        detected_angle = self._detected_line_angle(
+        camera_angle = self._detected_line_angle(
             screw1,
             screw2
         )
+        
+        # 相机安装方向相对设备坐标系偏转 +90°
+        # 将相机坐标角度转换为设备机械坐标角度
+        detected_angle = (camera_angle) % 180.0
 
         return (
             detected_angle,
