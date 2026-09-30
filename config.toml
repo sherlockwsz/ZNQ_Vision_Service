@@ -2,6 +2,8 @@
 
 [service]
 ads_poll_interval_ms = 20
+ads_reconnect_interval_ms = 1000
+ads_disconnect_failure_threshold = 5
 log_level = "INFO"
 log_dir = "logs"
 

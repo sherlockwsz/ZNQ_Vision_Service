@@ -35,13 +35,13 @@ class PipelineWorker(threading.Thread):
         self.detector = detector
         self.result_queue = result_queue
         self.stop_event = stop_event
-        self.jobs: queue.Queue[int] = queue.Queue(maxsize=1)
+        self.jobs: queue.Queue[tuple[int, int]] = queue.Queue(maxsize=1)
 
-    def submit(self, request_id: int) -> bool:
+    def submit(self, request_id: int, ads_session_id: int) -> bool:
         if not self.is_alive():
             return False
         try:
-            self.jobs.put_nowait(int(request_id))
+            self.jobs.put_nowait((int(request_id), int(ads_session_id)))
             return True
         except queue.Full:
             return False
@@ -49,16 +49,16 @@ class PipelineWorker(threading.Thread):
     def run(self):
         while not self.stop_event.is_set():
             try:
-                request_id = self.jobs.get(timeout=0.2)
+                request_id, ads_session_id = self.jobs.get(timeout=0.2)
             except queue.Empty:
                 continue
             started = time.perf_counter()
             try:
                 frame = self.source.capture_single()
                 result = self.detector.process_frame(frame)
-                self.result_queue.put((self.channel, request_id, result, None, time.perf_counter() - started))
+                self.result_queue.put((self.channel, request_id, ads_session_id, result, None, time.perf_counter() - started))
             except Exception as exc:
-                self.result_queue.put((self.channel, request_id, None, (exc, traceback.format_exc()), time.perf_counter() - started))
+                self.result_queue.put((self.channel, request_id, ads_session_id, None, (exc, traceback.format_exc()), time.perf_counter() - started))
             finally:
                 self.jobs.task_done()
 
@@ -232,60 +232,224 @@ def main() -> int:
             ams_port=int(ads_cfg.get("ams_port", 851)),
             ip_address=str(ads_cfg.get("ip_address", "")),
         ))
-        ads.open()
-        ads.set_online(screw_ready, coax_ready)
-
-        poll_s = max(0.005, float(cfg.get("service", {}).get("ads_poll_interval_ms", 20)) / 1000.0)
+        service_cfg = cfg.get("service", {})
+        poll_s = max(0.005, float(service_cfg.get("ads_poll_interval_ms", 20)) / 1000.0)
+        reconnect_s = max(
+            0.1,
+            float(service_cfg.get("ads_reconnect_interval_ms", 1000)) / 1000.0,
+        )
+        disconnect_threshold = max(
+            1,
+            int(service_cfg.get("ads_disconnect_failure_threshold", 5)),
+        )
+        ads_connected = False
+        ads_session_id = 0
+        ads_failure_count = 0
+        next_reconnect_at = 0.0
+        next_online_refresh_at = 0.0
         log.info("Vision service RUNNING (screw=%s coax=%s)", screw_ready, coax_ready)
 
         while not stop_event.is_set():
+            now = time.monotonic()
+
+            if not ads_connected:
+                if now < next_reconnect_at:
+                    stop_event.wait(min(poll_s, next_reconnect_at - now))
+                    continue
+                try:
+                    ads.open()
+                    ads.validate_connection()
+                except Exception as exc:
+                    ads.disconnect()
+                    next_reconnect_at = time.monotonic() + reconnect_s
+                    log.warning("ADS reconnect pending: %s", exc)
+                    stop_event.wait(poll_s)
+                    continue
+
+                old_session_id = ads_session_id
+                ads_session_id += 1
+                latest_submitted["screw"] = None
+                latest_submitted["coax"] = None
+                ads_failure_count = 0
+                ads_connected = True
+                log.info("ADS communication recovered")
+                log.info(
+                    "ADS session changed: %d -> %d",
+                    old_session_id,
+                    ads_session_id,
+                )
+                try:
+                    ads.set_online(screw_ready, coax_ready)
+                    next_online_refresh_at = float("inf")
+                except Exception as exc:
+                    next_online_refresh_at = time.monotonic() + 1.0
+                    log.warning("ADS online flag refresh pending: %s", exc)
+                # Formal PLC requests are intentionally deferred to the next
+                # complete poll after connection validation/session rollover.
+                continue
+
+            if now >= next_online_refresh_at:
+                try:
+                    ads.set_online(screw_ready, coax_ready)
+                    next_online_refresh_at = float("inf")
+                except Exception as exc:
+                    next_online_refresh_at = time.monotonic() + 1.0
+                    log.warning("ADS online flag refresh pending: %s", exc)
+
+            round_had_ads_error = False
+            last_ads_error = None
+
             # Poll PLC command structure. A new RequestId schedules exactly one
             # frame from the configured source for the corresponding pipeline.
-            try:
-                if screw_ready:
+            if screw_ready:
+                try:
                     st = ads.read_screw_request()
                     if st.enabled and st.request and st.request_id != latest_submitted["screw"]:
                         # Claim before prepare/submit. A queue failure consumes this
                         # RequestId and publishes one terminal service-fault result.
                         latest_submitted["screw"] = st.request_id
-                        ads.prepare_screw_request()
-                        if workers["screw"].submit(st.request_id):
-                            log.info("Screw request accepted: %d", st.request_id)
+                        try:
+                            ads.prepare_screw_request()
+                        except Exception as exc:
+                            round_had_ads_error = True
+                            last_ads_error = exc
+                            log.error(
+                                "Screw request transaction failed: request_id=%d "
+                                "session_id=%d stage=prepare error=%s",
+                                st.request_id,
+                                ads_session_id,
+                                exc,
+                            )
                         else:
-                            log.error("Screw request %d failed: worker queue submit fault", st.request_id)
-                            ads.publish_screw(st.request_id, invalid=True, service_fault=True)
-                if coax_ready:
+                            if workers["screw"].submit(st.request_id, ads_session_id):
+                                log.info("Screw request accepted: %d", st.request_id)
+                            else:
+                                log.error(
+                                    "Screw request %d failed: worker queue submit fault",
+                                    st.request_id,
+                                )
+                                try:
+                                    ads.publish_screw(
+                                        st.request_id,
+                                        invalid=True,
+                                        service_fault=True,
+                                    )
+                                except Exception as exc:
+                                    round_had_ads_error = True
+                                    last_ads_error = exc
+                                    log.error(
+                                        "Screw request transaction failed: request_id=%d "
+                                        "session_id=%d stage=publish error=%s",
+                                        st.request_id,
+                                        ads_session_id,
+                                        exc,
+                                    )
+                except Exception as exc:
+                    round_had_ads_error = True
+                    last_ads_error = exc
+                    log.warning("ADS Screw poll failed: %s", exc)
+
+            if coax_ready:
+                try:
                     st = ads.read_coax_request()
                     if st.enabled and st.request and st.request_id != latest_submitted["coax"]:
                         # Claim the ID before any queue/publish side effect. Even a
                         # queue failure therefore produces exactly one terminal
                         # result and can never re-enqueue the same RequestId.
                         latest_submitted["coax"] = st.request_id
-                        ads.prepare_coax_request()
-                        if workers["coax"].submit(st.request_id):
-                            log.info("Coax request accepted: %d", st.request_id)
+                        try:
+                            ads.prepare_coax_request()
+                        except Exception as exc:
+                            round_had_ads_error = True
+                            last_ads_error = exc
+                            log.error(
+                                "Coax request transaction failed: request_id=%d "
+                                "session_id=%d stage=prepare error=%s",
+                                st.request_id,
+                                ads_session_id,
+                                exc,
+                            )
                         else:
-                            ads.publish_coax(st.request_id, invalid=True, service_fault=True)
-            except Exception:
-                log.exception("ADS polling failed")
-                # A broken ADS connection is fatal because PLC handshake can no
-                # longer be guaranteed. Let PLC timeout the active transaction.
-                break
+                            if workers["coax"].submit(st.request_id, ads_session_id):
+                                log.info("Coax request accepted: %d", st.request_id)
+                            else:
+                                log.error(
+                                    "Coax request %d failed: worker queue submit fault",
+                                    st.request_id,
+                                )
+                                try:
+                                    ads.publish_coax(
+                                        st.request_id,
+                                        invalid=True,
+                                        service_fault=True,
+                                    )
+                                except Exception as exc:
+                                    round_had_ads_error = True
+                                    last_ads_error = exc
+                                    log.error(
+                                        "Coax request transaction failed: request_id=%d "
+                                        "session_id=%d stage=publish error=%s",
+                                        st.request_id,
+                                        ads_session_id,
+                                        exc,
+                                    )
+                except Exception as exc:
+                    round_had_ads_error = True
+                    last_ads_error = exc
+                    log.warning("ADS Coax poll failed: %s", exc)
+
+            # Once the current round reaches the configured consecutive-failure
+            # threshold, do not attempt to publish any queued result through the
+            # connection that is now classified as lost.
+            if round_had_ads_error and ads_failure_count + 1 >= disconnect_threshold:
+                ads_failure_count += 1
+                log.error(
+                    "ADS communication lost after %d consecutive failed rounds: %s",
+                    ads_failure_count,
+                    last_ads_error,
+                )
+                ads.disconnect()
+                ads_connected = False
+                next_reconnect_at = time.monotonic() + reconnect_s
+                continue
 
             # Publish completed worker results from this single ADS-owning thread.
             while True:
                 try:
-                    channel, request_id, result, err, wall_s = results.get_nowait()
+                    channel, request_id, result_session_id, result, err, wall_s = results.get_nowait()
                 except queue.Empty:
                     break
                 try:
+                    if result_session_id != ads_session_id:
+                        log.warning(
+                            "Discard stale %s result: request_id=%d "
+                            "result_session=%d current_session=%d",
+                            channel.capitalize(),
+                            request_id,
+                            result_session_id,
+                            ads_session_id,
+                        )
+                        continue
+
                     if err is not None:
                         exc, tb = err
                         log.error("%s request %d failed after %.3fs: %s\n%s", channel, request_id, wall_s, exc, tb)
-                        if channel == "screw":
-                            ads.publish_screw(request_id, invalid=True, service_fault=True)
-                        else:
-                            ads.publish_coax(request_id, invalid=True, service_fault=True)
+                        try:
+                            if channel == "screw":
+                                ads.publish_screw(request_id, invalid=True, service_fault=True)
+                            else:
+                                ads.publish_coax(request_id, invalid=True, service_fault=True)
+                        except Exception as publish_exc:
+                            round_had_ads_error = True
+                            last_ads_error = publish_exc
+                            log.error(
+                                "%s result transaction failed: request_id=%d "
+                                "session_id=%d stage=publish error=%s",
+                                channel.capitalize(),
+                                request_id,
+                                ads_session_id,
+                                publish_exc,
+                            )
                         continue
 
                     if channel == "screw":
@@ -314,15 +478,27 @@ def main() -> int:
                         else:
                             plc_correction_angle = 0.0  
                                                   
-                        ads.publish_screw(
-                            request_id,
-                            detected_angle=result.detected_angle,
-                            correction_angle=plc_correction_angle,
-                            detected=result.detected,
-                            confidence=result.confidence,
-                            invalid=not result.detected,
-                            service_fault=False,
-                        )
+                        try:
+                            ads.publish_screw(
+                                request_id,
+                                detected_angle=result.detected_angle,
+                                correction_angle=plc_correction_angle,
+                                detected=result.detected,
+                                confidence=result.confidence,
+                                invalid=not result.detected,
+                                service_fault=False,
+                            )
+                        except Exception as exc:
+                            round_had_ads_error = True
+                            last_ads_error = exc
+                            log.error(
+                                "Screw result transaction failed: request_id=%d "
+                                "session_id=%d stage=publish error=%s",
+                                request_id,
+                                ads_session_id,
+                                exc,
+                            )
+                            continue
                         if store is not None:
                             try:
                                 store.update("screw", result.annotated_image, {
@@ -341,14 +517,26 @@ def main() -> int:
                                  request_id, result.detected, result.detected_angle, plc_correction_angle,
                                  result.confidence, result.details.get("invalid_reason", ""), wall_s)
                     else:
-                        ads.publish_coax(
-                            request_id,
-                            coaxiality=result.coaxiality_mm,
-                            delta_x=result.delta_x_mm,
-                            delta_y=result.delta_y_mm,
-                            invalid=not result.detection_ok,
-                            service_fault=False,
-                        )
+                        try:
+                            ads.publish_coax(
+                                request_id,
+                                coaxiality=result.coaxiality_mm,
+                                delta_x=result.delta_x_mm,
+                                delta_y=result.delta_y_mm,
+                                invalid=not result.detection_ok,
+                                service_fault=False,
+                            )
+                        except Exception as exc:
+                            round_had_ads_error = True
+                            last_ads_error = exc
+                            log.error(
+                                "Coax result transaction failed: request_id=%d "
+                                "session_id=%d stage=publish error=%s",
+                                request_id,
+                                ads_session_id,
+                                exc,
+                            )
+                            continue
                         if store is not None:
                             try:
                                 store.update("coax", result.annotated_image, {
@@ -371,7 +559,23 @@ def main() -> int:
                 finally:
                     results.task_done()
 
-            time.sleep(poll_s)
+            if round_had_ads_error:
+                ads_failure_count += 1
+                if ads_failure_count >= disconnect_threshold:
+                    log.error(
+                        "ADS communication lost after %d consecutive failed rounds: %s",
+                        ads_failure_count,
+                        last_ads_error,
+                    )
+                    ads.disconnect()
+                    ads_connected = False
+                    next_reconnect_at = time.monotonic() + reconnect_s
+            else:
+                # Only a complete round without any ADS communication error
+                # clears the consecutive-failure count.
+                ads_failure_count = 0
+
+            stop_event.wait(poll_s)
 
     except Exception:
         log.exception("Vision service terminated by fatal error")

@@ -24,7 +24,7 @@ class PipelineWorker(threading.Thread):
         self.detector = detector
         self.result_queue = result_queue
         self.stop_event = stop_event
-        self.jobs: queue.Queue[int] = queue.Queue(maxsize=1)
+        self.jobs: queue.Queue[tuple[int, int]] = queue.Queue(maxsize=1)
         self.source_mode = source_mode
         self.preview_interval_s = 1.0 / max(0.1, float(preview_fps))
         self.preview_max_width = int(preview_max_width)
@@ -36,11 +36,11 @@ class PipelineWorker(threading.Thread):
     def configure_image_store(self, image_store: LatestImageStore | None) -> None:
         self.image_store = image_store
 
-    def submit(self, request_id: int) -> bool:
+    def submit(self, request_id: int, ads_session_id: int) -> bool:
         if not self.is_alive():
             return False
         try:
-            self.jobs.put_nowait(int(request_id))
+            self.jobs.put_nowait((int(request_id), int(ads_session_id)))
             return True
         except queue.Full:
             return False
@@ -49,12 +49,13 @@ class PipelineWorker(threading.Thread):
         next_preview_at = time.monotonic()
         while not self.stop_event.is_set():
             try:
-                request_id = self.jobs.get_nowait()
+                job = self.jobs.get_nowait()
             except queue.Empty:
-                request_id = None
+                job = None
 
-            if request_id is not None:
-                self._run_detection(request_id)
+            if job is not None:
+                request_id, ads_session_id = job
+                self._run_detection(request_id, ads_session_id)
                 next_preview_at = time.monotonic()
                 continue
 
@@ -72,19 +73,19 @@ class PipelineWorker(threading.Thread):
                 wait_s = min(wait_s, max(0.001, next_preview_at - now))
             self.stop_event.wait(wait_s)
 
-    def _run_detection(self, request_id: int) -> None:
+    def _run_detection(self, request_id: int, ads_session_id: int) -> None:
         started = time.perf_counter()
         try:
             # File-mode formal detection deliberately bypasses preview cache.
             frame = self.source.capture_single()
             result = self.detector.process_frame(frame)
             self.result_queue.put(
-                (self.channel, request_id, result, None,
+                (self.channel, request_id, ads_session_id, result, None,
                  time.perf_counter() - started)
             )
         except Exception as exc:
             self.result_queue.put(
-                (self.channel, request_id, None,
+                (self.channel, request_id, ads_session_id, None,
                  (exc, traceback.format_exc()), time.perf_counter() - started)
             )
         finally:

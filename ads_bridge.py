@@ -32,6 +32,9 @@ class VisionAdsBridge:
         self.conn: Optional[pyads.Connection] = None
 
     def open(self) -> None:
+        # A reconnect always starts with a new pyads.Connection. Never reuse an
+        # object that has already been classified as disconnected.
+        self.disconnect()
         target = self.cfg.ams_net_id.strip()
         if not target:
             try:
@@ -43,9 +46,35 @@ class VisionAdsBridge:
         kwargs = {}
         if self.cfg.ip_address.strip():
             kwargs["ip_address"] = self.cfg.ip_address.strip()
-        self.conn = pyads.Connection(target, int(self.cfg.ams_port), **kwargs)
-        self.conn.open()
-        log.info("ADS connected to %s:%s", target, self.cfg.ams_port)
+        conn = pyads.Connection(target, int(self.cfg.ams_port), **kwargs)
+        try:
+            conn.open()
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+        self.conn = conn
+        log.info("ADS transport opened to %s:%s", target, self.cfg.ams_port)
+
+    def validate_connection(self) -> None:
+        """Confirm that at least one known PLC vision symbol is readable."""
+        errors = []
+        for name in (
+            f"{self.SCREW}.bUseScrewVision",
+            f"{self.COAX}.bUseCoaxVision",
+        ):
+            try:
+                self._read(name, pyads.PLCTYPE_BOOL)
+                return
+            except Exception as exc:
+                errors.append(f"{name}: {exc}")
+        raise RuntimeError(
+            "ADS opened but no known PLC vision symbol is readable ("
+            + "; ".join(errors)
+            + ")"
+        )
 
     def _read(self, name, plc_type):
         if self.conn is None:
@@ -123,7 +152,15 @@ class VisionAdsBridge:
             self.set_online(False, False)
         except Exception:
             log.exception("Failed to clear Vision online flags during shutdown")
+        self.disconnect()
+
+    def disconnect(self) -> None:
+        """Close the current transport without performing any ADS writes."""
+        conn = self.conn
+        self.conn = None
+        if conn is None:
+            return
         try:
-            self.conn.close()
-        finally:
-            self.conn = None
+            conn.close()
+        except Exception:
+            log.warning("Failed to close stale ADS connection", exc_info=True)
