@@ -135,12 +135,19 @@ class VisionAdsBridge:
 
     def publish_coax(self, request_id: int, *, coaxiality: float = 0.0,
                      delta_x: float = 0.0, delta_y: float = 0.0,
+                     correction_x: float = 0.0, correction_y: float = 0.0,
                      invalid: bool = False, service_fault: bool = False) -> None:
         p = self.COAX
+        # Terminal invalid/fault results must never carry a stale correction.
+        if invalid or service_fault:
+            correction_x = 0.0
+            correction_y = 0.0
         self._write(f"{p}.udiResultId", int(request_id), pyads.PLCTYPE_UDINT)
         self._write(f"{p}.fCoaxiality", float(coaxiality), pyads.PLCTYPE_LREAL)
         self._write(f"{p}.fDeltaX", float(delta_x), pyads.PLCTYPE_LREAL)
         self._write(f"{p}.fDeltaY", float(delta_y), pyads.PLCTYPE_LREAL)
+        self._write(f"{p}.fCorrectionX", float(correction_x), pyads.PLCTYPE_LREAL)
+        self._write(f"{p}.fCorrectionY", float(correction_y), pyads.PLCTYPE_LREAL)
         self._write(f"{p}.bResultInvalid", bool(invalid), pyads.PLCTYPE_BOOL)
         self._write(f"{p}.bServiceFault", bool(service_fault), pyads.PLCTYPE_BOOL)
         self._write(f"{p}.bResultValid", True, pyads.PLCTYPE_BOOL)

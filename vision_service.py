@@ -189,19 +189,25 @@ def main() -> int:
 
         try:
             coax_source = _create_source(cfg, base_dir, "coax", coax_mode, manager)
+            coax_input_cfg = cfg.get("coax_input", {})
+            coax_rotate_180 = bool(coax_input_cfg.get("rotate_180", False))
             coax_cfg = cfg.get("coax_algorithm", {})
+            coax_mapping = cfg.get("coax_mapping", {})
             proc_path = base_dir / str(coax_cfg.get("procedure_path", "detect_coax.hdvp"))
             coax_detector = CoaxHalconDetector(
                 proc_path,
                 reference_x_px=float(coax_cfg.get("reference_x_px", -1.0)),
                 reference_y_px=float(coax_cfg.get("reference_y_px", -1.0)),
                 mm_per_pixel=float(coax_cfg.get("mm_per_pixel", 0.0025)),
+                correction_x_scale=float(coax_mapping.get("correction_x_scale", 1.0)),
+                correction_y_scale=float(coax_mapping.get("correction_y_scale", 1.0)),
             )
             workers["coax"] = PreviewPipelineWorker(
                 "coax", coax_source, coax_detector, results, stop_event,
                 source_mode=coax_mode, preview_fps=preview_fps,
                 preview_max_width=preview_max_width,
-                preview_jpeg_quality=preview_jpeg_quality)
+                preview_jpeg_quality=preview_jpeg_quality,
+                rotate_180=coax_rotate_180)
             workers["coax"].start()
             coax_ready = True
             log.info("Coax pipeline ready (input=%s)", coax_mode)
@@ -458,6 +464,18 @@ def main() -> int:
                         screw_mapping = cfg.get("screw_mapping", {})
                         correction_sign = float(screw_mapping["correction_sign"])
                         correction_offset_deg = float(screw_mapping["correction_offset_deg"])
+
+                        # ---------------------------------------------------------
+                        # 0 or 1 Screw = normal "skip current slot" business result.
+                        #
+                        # Only this case is removed from InvalidResult so that the
+                        # PLC can enter its existing SkippedNoScrew path.
+                        #
+                        # Other current detection semantics remain unchanged.
+                        # ---------------------------------------------------------
+                        screw_count = len(result.details.get("screw_boxes", []))
+                        skip_screw_missing = screw_count <= 1
+
                         if result.detected:
                             detected_angle = result.detected_angle
 
@@ -476,8 +494,15 @@ def main() -> int:
                                 + correction_offset_deg
                             )
                         else:
-                            plc_correction_angle = 0.0  
-                                                  
+                            plc_correction_angle = 0.0
+
+                        # Preserve all existing InvalidResult behavior except
+                        # the explicit zero-Screw case.
+                        screw_result_invalid = (
+                            (not result.detected)
+                            and (not skip_screw_missing)
+                        )
+
                         try:
                             ads.publish_screw(
                                 request_id,
@@ -485,7 +510,7 @@ def main() -> int:
                                 correction_angle=plc_correction_angle,
                                 detected=result.detected,
                                 confidence=result.confidence,
-                                invalid=not result.detected,
+                                invalid=screw_result_invalid,
                                 service_fault=False,
                             )
                         except Exception as exc:
@@ -523,6 +548,8 @@ def main() -> int:
                                 coaxiality=result.coaxiality_mm,
                                 delta_x=result.delta_x_mm,
                                 delta_y=result.delta_y_mm,
+                                correction_x=result.correction_x_mm,
+                                correction_y=result.correction_y_mm,
                                 invalid=not result.detection_ok,
                                 service_fault=False,
                             )

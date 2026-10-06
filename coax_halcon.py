@@ -21,6 +21,8 @@ class CoaxInspectionResult:
     used_fallback: bool
     detect_time_ms: float
     annotated_image: np.ndarray
+    correction_x_mm: float = 0.0  # ADS fCorrectionX: relative AdjustmentX displacement
+    correction_y_mm: float = 0.0  # ADS fCorrectionY: relative AdjustmentY displacement
 
 
 class CoaxHalconDetector:
@@ -33,7 +35,8 @@ class CoaxHalconDetector:
     """
 
     def __init__(self, procedure_path: str | Path, *, reference_x_px: float,
-                 reference_y_px: float, mm_per_pixel: float):
+                 reference_y_px: float, mm_per_pixel: float,
+                 correction_x_scale: float = 1.0, correction_y_scale: float = 1.0):
         try:
             import halcon as ha
         except ImportError as exc:
@@ -47,6 +50,12 @@ class CoaxHalconDetector:
         self.reference_x_px = float(reference_x_px)
         self.reference_y_px = float(reference_y_px)
         self.mm_per_pixel = float(mm_per_pixel)
+        self.correction_x_scale = float(correction_x_scale)
+        self.correction_y_scale = float(correction_y_scale)
+        for name, value in (("correction_x_scale", self.correction_x_scale),
+                            ("correction_y_scale", self.correction_y_scale)):
+            if not math.isfinite(value):
+                raise ValueError(f"coax_mapping.{name} must be finite")
         if not math.isfinite(self.mm_per_pixel) or self.mm_per_pixel <= 0.0:
             raise ValueError("coax_algorithm.mm_per_pixel must be a finite value greater than zero")
         for name, value in (("reference_x_px", self.reference_x_px),
@@ -113,6 +122,11 @@ class CoaxHalconDetector:
             delta_y = 0.0
             coaxiality = 0.0
 
+        # Mapping is independent of measurement semantics: AdjustmentX+ moves
+        # the center down; AdjustmentY+ moves it right in the rotated image.
+        correction_x = -delta_y * self.correction_x_scale if ok else 0.0
+        correction_y = -delta_x * self.correction_y_scale if ok else 0.0
+
         annotated = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
         if ok:
             cv2.circle(annotated, (int(round(center_x)), int(round(center_y))), int(round(radius)), (0, 0, 255), 2)
@@ -136,4 +150,6 @@ class CoaxHalconDetector:
             used_fallback=fallback,
             detect_time_ms=detect_ms,
             annotated_image=annotated,
+            correction_x_mm=correction_x,
+            correction_y_mm=correction_y,
         )

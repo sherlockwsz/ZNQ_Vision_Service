@@ -29,6 +29,8 @@ image_path = "../test_images/screw_test.bmp"
 mode = "camera"
 # The file is decoded again for every new PLC Coax RequestId.
 image_path = "../test_images/coax_test.bmp"
+# Rotate the Coax image before HALCON detection and TCP preview output.
+rotate_180 = true
 
 [screw_camera]
 model_name = "ME2P-1230-9GM-P"
@@ -77,6 +79,11 @@ mm_per_pixel = 0.0025
 # +DeltaY is image-down, and Python never commands Adjustment axes.
 delta_x_sign = 1.0
 delta_y_sign = 1.0
+# Relative mechanical correction in mm; no offset or dead zone is applied.
+# CorrectionX = -DeltaY * correction_x_scale (AdjustmentX+ -> image-down)
+# CorrectionY = -DeltaX * correction_y_scale (AdjustmentY+ -> image-right)
+correction_x_scale = 1.0
+correction_y_scale = 1.0
 
 [tcp_image]
 host = "0.0.0.0"

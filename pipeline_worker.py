@@ -6,6 +6,8 @@ import threading
 import time
 import traceback
 
+import cv2
+
 from tcp_image_server import LatestImageStore
 
 log = logging.getLogger(__name__)
@@ -17,7 +19,7 @@ class PipelineWorker(threading.Thread):
     def __init__(self, name, source, detector, result_queue: queue.Queue,
                  stop_event: threading.Event, *, source_mode: str,
                  preview_fps: float, preview_max_width: int,
-                 preview_jpeg_quality: int):
+                 preview_jpeg_quality: int, rotate_180: bool = False):
         super().__init__(name=f"{name}-worker", daemon=True)
         self.channel = name
         self.source = source
@@ -29,12 +31,18 @@ class PipelineWorker(threading.Thread):
         self.preview_interval_s = 1.0 / max(0.1, float(preview_fps))
         self.preview_max_width = int(preview_max_width)
         self.preview_jpeg_quality = int(preview_jpeg_quality)
+        self.rotate_180 = bool(rotate_180)
         self.image_store: LatestImageStore | None = None
         self.preview_frame_id = 0
         self._last_preview_error = ""
 
     def configure_image_store(self, image_store: LatestImageStore | None) -> None:
         self.image_store = image_store
+
+    def _preprocess_frame(self, frame):
+        if frame is not None and self.rotate_180:
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
+        return frame
 
     def submit(self, request_id: int, ads_session_id: int) -> bool:
         if not self.is_alive():
@@ -78,6 +86,7 @@ class PipelineWorker(threading.Thread):
         try:
             # File-mode formal detection deliberately bypasses preview cache.
             frame = self.source.capture_single()
+            frame = self._preprocess_frame(frame)
             result = self.detector.process_frame(frame)
             self.result_queue.put(
                 (self.channel, request_id, ads_session_id, result, None,
@@ -102,6 +111,7 @@ class PipelineWorker(threading.Thread):
                 self.source.capture_single,
             )
             frame = capture()
+            frame = self._preprocess_frame(frame)
             self.preview_frame_id += 1
             metadata = {
                 "frame_id": self.preview_frame_id,
