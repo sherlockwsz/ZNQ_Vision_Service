@@ -111,6 +111,8 @@ class VisionAdsBridge:
         self._write(f"{p}.bResultValid", False, pyads.PLCTYPE_BOOL)
         self._write(f"{p}.bResultInvalid", False, pyads.PLCTYPE_BOOL)
         self._write(f"{p}.bServiceFault", False, pyads.PLCTYPE_BOOL)
+        self._write(f"{p}.sPresenceResult", "", pyads.PLCTYPE_STRING)
+        self._write(f"{p}.fEmptyConfidence", 0.0, pyads.PLCTYPE_LREAL)
 
     def prepare_coax_request(self) -> None:
         p = self.COAX
@@ -121,8 +123,17 @@ class VisionAdsBridge:
     def publish_screw(self, request_id: int, *, detected_angle: float = 0.0,
                       correction_angle: float = 0.0, detected: bool = False,
                       confidence: float = 0.0, invalid: bool = False,
-                      service_fault: bool = False) -> None:
+                      service_fault: bool = False, presence: str = "",
+                      empty_confidence: float = 0.0) -> None:
         p = self.SCREW
+        # Fail closed if PLC does not expose new slot-result symbols.
+        # This prevents the old PLC from silently consuming N as a valid
+        # "missing Screw" result before its skip-branch is updated.
+        if presence not in ("N", "Y", ""):
+            raise ValueError("presence must be N, Y or blank for a service fault")
+        self._write(f"{p}.bResultValid", False, pyads.PLCTYPE_BOOL)
+        self._write(f"{p}.sPresenceResult", presence, pyads.PLCTYPE_STRING)
+        self._write(f"{p}.fEmptyConfidence", float(empty_confidence), pyads.PLCTYPE_LREAL)
         # Payload first; ResultValid last is the transaction commit flag.
         self._write(f"{p}.udiResultId", int(request_id), pyads.PLCTYPE_UDINT)
         self._write(f"{p}.fDetectedAngle", float(detected_angle), pyads.PLCTYPE_LREAL)

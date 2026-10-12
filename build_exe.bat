@@ -5,6 +5,7 @@ py -3.11 -m PyInstaller --noconfirm --clean --onedir --name VisionService ^
   --add-data "config.toml;." ^
   --add-data "detect_coax.hdvp;." ^
   --add-data "best.pt;." ^
+  --add-data "empty_slot.pt;." ^
   --collect-all ultralytics ^
   vision_service.py
 

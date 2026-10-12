@@ -154,3 +154,14 @@ File 模式的 Preview 按文件 `mtime` 复用解码缓存；同名文件发生
 - 人工放置多个已知角度样件，确认 `fCorrectionAngle` 与 DamperRotation 实际正方向一致。
 - 低速验证 `screw_mapping.correction_sign`；若算法定义的顺时针正方向与 DamperRotation 机械正方向相反，只改映射符号，不改角度算法。
 - WPF 只读 TCP 图像，不直接连接相机。
+
+
+## 2026-10-12 PLC正式集成
+
+本目录与同一交付包中的 `ZNQ_MoveCtrl` 配套：`ST_ScrewVisionInterface`、`ST_ScrewAngleVisionResult`、`FB_ScrewAngleVision` 和 `FB_DamperProcess` 已同步修改。
+
+- 仅本次有效 `sPresenceResult='N'` 允许跳点。
+- `Y` 且 Screw/Spring 未满足原算法的检测条件则 `bResultInvalid=TRUE`，由 PLC 转为视觉故障。
+- `N` 不运行第二模型；`Y` 重用同一 ME2P 采集帧。
+- PLC物理空位流程 `bTakeSkippedEmptySlot` 保持原逻辑，不等于视觉空位判断。
+- 未提供真实相机/PLC/HALCON环境，本交付为待目标工控机编译和实机验证版本。

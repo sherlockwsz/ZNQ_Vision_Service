@@ -22,6 +22,7 @@ from coax_halcon import CoaxHalconDetector
 from image_file_source import ImageFileSource
 from pipeline_worker import PipelineWorker as PreviewPipelineWorker
 from screw_ai import ScrewSpringDetector
+from empty_slot import EmptySlotDetector, SlotThenScrewDetector
 from tcp_image_server import LatestImageStore, TcpImageServer
 
 log = logging.getLogger("vision_service")
@@ -176,8 +177,12 @@ def main() -> int:
                 min_screw_distance_mm=float(screw_cfg["min_screw_distance_mm"]),
                 max_screw_distance_mm=float(screw_cfg["max_screw_distance_mm"]),
             )
+            empty_cfg = cfg.get("empty_slot", {})
+            empty_path = base_dir / str(empty_cfg.get("model_path", "empty_slot.pt"))
+            empty_detector = EmptySlotDetector(empty_path, float(empty_cfg.get("threshold", 0.70)))
+            screw_cascade = SlotThenScrewDetector(empty_detector, screw_detector)
             workers["screw"] = PreviewPipelineWorker(
-                "screw", screw_source, screw_detector, results, stop_event,
+                "screw", screw_source, screw_cascade, results, stop_event,
                 source_mode=screw_mode, preview_fps=preview_fps,
                 preview_max_width=preview_max_width,
                 preview_jpeg_quality=preview_jpeg_quality)
@@ -459,69 +464,54 @@ def main() -> int:
                         continue
 
                     if channel == "screw":
-                        # Convert the measured undirected line angle into the PLC
-                        # correction command using only configured machine mapping.
+                        # Only the empty-slot model can authorize skipping a point.
+                        # A Y decision always enters the unmodified screw algorithm.
+                        presence = result.presence
+                        screw_result = result.screw
                         screw_mapping = cfg.get("screw_mapping", {})
                         correction_sign = float(screw_mapping["correction_sign"])
                         correction_offset_deg = float(screw_mapping["correction_offset_deg"])
-
-                        # ---------------------------------------------------------
-                        # 0 or 1 Screw = normal "skip current slot" business result.
-                        #
-                        # Only this case is removed from InvalidResult so that the
-                        # PLC can enter its existing SkippedNoScrew path.
-                        #
-                        # Other current detection semantics remain unchanged.
-                        # ---------------------------------------------------------
-                        screw_count = len(result.details.get("screw_boxes", []))
-                        skip_screw_missing = screw_count <= 1
-
-                        if result.detected:
-                            detected_angle = result.detected_angle
-
-                            # Minimum signed rotation required to make the
-                            # undirected screw line horizontal (0° / 180°).
-                            #
-                            # Assumption:
-                            # DamperRotation positive direction increases
-                            # the detected image angle.
-                            correction_angle = (
-                                (90.0 - detected_angle) % 180.0
-                            ) - 90.0
-
-                            plc_correction_angle = (
-                                correction_angle * correction_sign
-                                + correction_offset_deg
-                            )
-                        else:
+                        if presence == "N":
+                            detected_angle = 0.0
                             plc_correction_angle = 0.0
-
-                        # Preserve all existing InvalidResult behavior except
-                        # the explicit zero-Screw case.
-                        screw_result_invalid = (
-                            (not result.detected)
-                            and (not skip_screw_missing)
-                        )
-
+                            confidence = 0.0
+                            detected = False
+                            invalid = False
+                            reason = "empty slot detected by Circle model"
+                        elif presence == "Y":
+                            if screw_result is None:
+                                raise RuntimeError("Y requires screw inference")
+                            detected_angle = float(screw_result.detected_angle)
+                            detected = bool(screw_result.detected)
+                            confidence = float(screw_result.confidence)
+                            if detected:
+                                correction_angle = ((90.0 - detected_angle) % 180.0) - 90.0
+                                plc_correction_angle = correction_angle * correction_sign + correction_offset_deg
+                            else:
+                                plc_correction_angle = 0.0
+                            # Missing screws NEVER become a skip result.
+                            invalid = not detected
+                            reason = screw_result.details.get("invalid_reason", "")
+                        else:
+                            raise RuntimeError(f"Unexpected presence {presence!r}")
                         try:
                             ads.publish_screw(
                                 request_id,
-                                detected_angle=result.detected_angle,
+                                detected_angle=detected_angle,
                                 correction_angle=plc_correction_angle,
-                                detected=result.detected,
-                                confidence=result.confidence,
-                                invalid=screw_result_invalid,
+                                detected=detected,
+                                confidence=confidence,
+                                invalid=invalid,
                                 service_fault=False,
+                                presence=presence,
+                                empty_confidence=result.empty_confidence,
                             )
                         except Exception as exc:
                             round_had_ads_error = True
                             last_ads_error = exc
                             log.error(
-                                "Screw result transaction failed: request_id=%d "
-                                "session_id=%d stage=publish error=%s",
-                                request_id,
-                                ads_session_id,
-                                exc,
+                                "Screw+Slot publish failed: request_id=%d session_id=%d error=%s",
+                                request_id, ads_session_id, exc,
                             )
                             continue
                         if store is not None:
@@ -530,17 +520,20 @@ def main() -> int:
                                     "request_id": request_id,
                                     "source_mode": screw_mode,
                                     "source_name": getattr(screw_source, "source_name", ""),
-                                    "detected": result.detected,
-                                    "detected_angle": result.detected_angle,
+                                    "presence": presence,
+                                    "empty_confidence": result.empty_confidence,
+                                    "detected": detected,
+                                    "detected_angle": detected_angle,
                                     "correction_angle": plc_correction_angle,
-                                    "confidence": result.confidence,
-                                    "invalid_reason": result.details.get("invalid_reason", ""),
+                                    "confidence": confidence,
+                                    "invalid_reason": reason,
                                 })
                             except Exception:
-                                log.exception("Optional Screw JPEG update failed; ADS result was already committed")
-                        log.info("Screw result %d: detected=%s detectedAngle=%.3f plcCorrection=%.3f confidence=%.3f reason=%s wall=%.3fs",
-                                 request_id, result.detected, result.detected_angle, plc_correction_angle,
-                                 result.confidence, result.details.get("invalid_reason", ""), wall_s)
+                                log.exception("Optional Screw JPEG update failed; ADS result already committed")
+                        log.info(
+                            "Slot+Screw %d: presence=%s circleConfidence=%.3f screwDetected=%s invalid=%s reason=%s wall=%.3fs",
+                            request_id, presence, result.empty_confidence, detected, invalid, reason, wall_s,
+                        )
                     else:
                         try:
                             ads.publish_coax(

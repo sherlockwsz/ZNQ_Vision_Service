@@ -49,6 +49,11 @@ exposure_us = 0.0
 gain_db = -1.0
 timeout_ms = 3000
 
+[empty_slot]
+# Separate Circle-class model. Circle confidence >= 0.70 means EMPTY => N.
+model_path = "empty_slot.pt"
+threshold = 0.70
+
 [screw_algorithm]
 model_path = "best.pt"
 # TEMPORARY COMMISSIONING PLACEHOLDER. Replace with the calibrated Screw Camera
